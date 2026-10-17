@@ -160,12 +160,8 @@ class TempMailNotificationWorker(context: Context, params: WorkerParameters) : C
         if (old.isNotEmpty() && newMessages.isNotEmpty()) showTempMailNotification(applicationContext, newMessages.size, newMessages.first().subject, activeAddress)
         prefs.edit().putStringSet("known_$activeAddress", old + ids).apply()
         Result.success()
+        } catch (_: Exception) { Result.retry() }
     }
-    }
- catch (_: Exception) { Result.retry() }
-    }
-
-}
 
 private fun scheduleTempMailBackgroundChecks(context: Context) {
     val request = PeriodicWorkRequestBuilder<TempMailNotificationWorker>(15, TimeUnit.MINUTES).build()
