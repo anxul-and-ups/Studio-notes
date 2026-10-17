@@ -140,7 +140,8 @@ private suspend fun fetchMessageBody(account: MailAccount, messageId: String): S
 
 /** Periodic background check. Android/WorkManager controls the exact run time (minimum 15 minutes). */
 class TempMailNotificationWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
-    override suspend fun doWork(): Result = try {
+    override suspend fun doWork(): Result {
+        return try {
         val prefs = applicationContext.getSharedPreferences("au_temp_mail_store", Context.MODE_PRIVATE)
         val activeAddress = prefs.getString("active", null) ?: return Result.success()
         val accounts = JSONArray(prefs.getString("accounts", "[]"))
@@ -159,7 +160,11 @@ class TempMailNotificationWorker(context: Context, params: WorkerParameters) : C
         if (old.isNotEmpty() && newMessages.isNotEmpty()) showTempMailNotification(applicationContext, newMessages.size, newMessages.first().subject, activeAddress)
         prefs.edit().putStringSet("known_$activeAddress", old + ids).apply()
         Result.success()
-    } catch (_: Exception) { Result.retry() }
+    }
+    }
+ catch (_: Exception) { Result.retry() }
+    }
+
 }
 
 private fun scheduleTempMailBackgroundChecks(context: Context) {
