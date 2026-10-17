@@ -27,6 +27,11 @@ import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -50,7 +55,17 @@ private val mailClient = OkHttpClient.Builder().callTimeout(25, TimeUnit.SECONDS
 private val jsonType = "application/json".toMediaType()
 
 private data class MailAccount(val address: String, val password: String, val token: String, val deleted: Boolean = false)
-private data class MailMessage(val id: String, val from: String, val subject: String, val intro: String, val seen: Boolean, val body: String = "")
+private data class MailAttachment(val id: String, val filename: String, val contentType: String, val size: Int, val downloadUrl: String)
+data class MailMessage(
+    val id: String,
+    val from: String,
+    val subject: String,
+    val intro: String,
+    val seen: Boolean,
+    val htmlBody: String = "",
+    val textBody: String = "",
+    val attachments: List<MailAttachment> = emptyList()
+)
 
 private object TempMailStore {
     private const val PREF = "au_temp_mail_store"
@@ -125,17 +140,43 @@ private suspend fun fetchMessages(account: MailAccount): List<MailMessage> {
     } }.filter { it.id.isNotBlank() }
 }
 
-private suspend fun fetchMessageBody(account: MailAccount, messageId: String): String {
+private suspend fun fetchMessageBody(account: MailAccount, messageId: String): MailMessage {
     val detail = api("GET", "/messages/${java.net.URLEncoder.encode(messageId, "UTF-8")}", account.token)
-    val plain = detail.optJSONArray("text")?.let { array ->
-        (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }.joinToString("\n\n")
-    }.orEmpty()
-    if (plain.isNotBlank()) return plain
-    val html = detail.optJSONArray("html")?.let { array ->
-        (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }.joinToString("\n")
-    }.orEmpty()
-    if (html.isNotBlank()) return android.text.Html.fromHtml(html, android.text.Html.FROM_HTML_MODE_LEGACY).toString().trim()
-    return detail.optString("intro").ifBlank { "This message has no readable text body." }
+    
+    val fromObj = detail.optJSONObject("from")
+    val fromName = fromObj?.optString("name", "") ?: ""
+    val fromAddress = fromObj?.optString("address", "Unknown sender") ?: "Unknown sender"
+    val finalFrom = if (fromName.isNotBlank()) "$fromName <$fromAddress>" else fromAddress
+
+    val html = detail.optJSONArray("html")?.let { arr ->
+        (0 until arr.length()).joinToString("") { arr.optString(it, "") }
+    } ?: ""
+    
+    val text = detail.optString("text", "")
+    
+    val attArray = detail.optJSONArray("attachments") ?: JSONArray()
+    val attachments = (0 until attArray.length()).mapNotNull { i ->
+        attArray.optJSONObject(i)?.let { att ->
+            MailAttachment(
+                id = att.optString("id"),
+                filename = att.optString("filename", "file"),
+                contentType = att.optString("contentType", "application/octet-stream"),
+                size = att.optInt("size", 0),
+                downloadUrl = att.optString("downloadUrl", "")
+            )
+        }
+    }
+
+    return MailMessage(
+        id = detail.optString("id"),
+        from = finalFrom,
+        subject = detail.optString("subject", "(No subject)"),
+        intro = detail.optString("intro", ""),
+        seen = detail.optBoolean("seen"),
+        htmlBody = html,
+        textBody = text,
+        attachments = attachments
+    )
 }
 
 /** Periodic background check. Android/WorkManager controls the exact run time (minimum 15 minutes). */
@@ -282,7 +323,49 @@ fun TempMailScreen(isDarkMode: Boolean, onBack: () -> Unit) {
             }
         }
     }
-    selectedMessage?.let { message -> AlertDialog(onDismissRequest = { selectedMessage = null }, title = { Text(message.subject) }, text = { Column { Text("From: ${message.from}"); Spacer(Modifier.height(8.dp)); if (messageBodyLoading) LinearProgressIndicator(Modifier.fillMaxWidth()); Text(selectedMessageBody.ifBlank { message.intro.ifBlank { "Loading email content…" } }) } }, confirmButton = { TextButton(onClick = { selectedMessage = null }) { Text("Close") } }) }
+    selectedMessage?.let { message ->
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { selectedMessage = null },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            androidx.compose.material3.Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background
+            ) {
+                Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("From: ${message.from}", fontWeight = FontWeight.Bold, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { selectedMessage = null }) {
+                            Icon(Icons.Default.Close, contentDescription = "Close")
+                        }
+                    }
+                    Text(message.subject, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp, modifier = Modifier.padding(vertical = 8.dp))
+                    androidx.compose.material3.HorizontalDivider()
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    if (messageBodyLoading) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else {
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                                val textToShow = if (selectedMessageBody.isNotBlank()) selectedMessageBody else message.intro.ifBlank { "No content" }
+                                Text(text = textToShow, fontSize = 15.sp, lineHeight = 22.sp)
+                                
+                                if (message.attachments.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(16.dp))
+                                    Text("Attachments:", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    message.attachments.forEach { att ->
+                                        Text("- ${att.filename} (${att.contentType})", fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable private fun AccountList(accounts: List<MailAccount>, activeAddress: String?, fg: androidx.compose.ui.graphics.Color, card: androidx.compose.ui.graphics.Color, onSelect: (MailAccount) -> Unit, onDelete: (MailAccount) -> Unit) {
