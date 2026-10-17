@@ -52,6 +52,7 @@ import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SplashScreen
 import com.example.ui.screens.StorageFileEditorScreen
 import com.example.ui.screens.TableEditorScreen
+import com.example.ui.screens.TempMailScreen
 import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.launch
 
@@ -68,6 +69,7 @@ sealed class Screen {
     data object NameGenerator : Screen()
     data object HtmlViewer : Screen()
     data object CommandMode : Screen()
+    data object TempMail : Screen()
     data class TableEditor(val initialTableData: String, val onSaved: (String) -> Unit) : Screen()
     data object RecycleBin : Screen()
     data object StorageEditor : Screen()
@@ -489,6 +491,13 @@ fun AuNotesApp(
                 )
             }
 
+            is Screen.TempMail -> {
+                TempMailScreen(
+                    isDarkMode = isDarkMode,
+                    onBack = { currentScreen = Screen.MainWorkspace() }
+                )
+            }
+
             is Screen.CommandMode -> {
                 CommandModeScreen(
                     repository = repository,
@@ -588,6 +597,10 @@ fun AuNotesApp(
             onOpenCommandMode = {
                 isSidebarOpen = false
                 currentScreen = Screen.CommandMode
+            },
+            onOpenTempMail = {
+                isSidebarOpen = false
+                currentScreen = Screen.TempMail
             },
             onOpenSettings = {
                 isSidebarOpen = false

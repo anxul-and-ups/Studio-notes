@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContactMail
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
@@ -100,6 +101,7 @@ fun GlassSidebar(
     onOpenHtmlViewer: () -> Unit = {},
     onOpenNameGenerator: () -> Unit,
     onOpenCommandMode: () -> Unit,
+    onOpenTempMail: () -> Unit = {},
     onOpenSettings: () -> Unit,
     onOpenRecycleBin: () -> Unit,
     onOpenFeaturesModal: () -> Unit,
@@ -266,6 +268,17 @@ fun GlassSidebar(
                         onClick = {
                             onClose()
                             onOpenCommandMode()
+                        }
+                    )
+
+                    // Temp Mail — temporary inbox, address history and recovery
+                    SidebarMenuItem(
+                        icon = Icons.Default.Email,
+                        title = "Temp Mail",
+                        isDarkMode = isDarkMode,
+                        onClick = {
+                            onClose()
+                            onOpenTempMail()
                         }
                     )
 
