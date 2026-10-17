@@ -50,7 +50,7 @@ private val mailClient = OkHttpClient.Builder().callTimeout(25, TimeUnit.SECONDS
 private val jsonType = "application/json".toMediaType()
 
 private data class MailAccount(val address: String, val password: String, val token: String, val deleted: Boolean = false)
-private data class MailMessage(val id: String, val from: String, val subject: String, val intro: String, val seen: Boolean)
+private data class MailMessage(val id: String, val from: String, val subject: String, val intro: String, val seen: Boolean, val body: String = "")
 
 private object TempMailStore {
     private const val PREF = "au_temp_mail_store"
@@ -71,11 +71,11 @@ private object TempMailStore {
     fun saveKnownIds(context: Context, address: String, ids: Set<String>) { prefs(context).edit().putStringSet("known_$address", ids).apply() }
     fun cachedMessages(context: Context): List<MailMessage> {
         val array = runCatching { JSONArray(prefs(context).getString("cached_messages", "[]")) }.getOrElse { JSONArray() }
-        return (0 until array.length()).mapNotNull { i -> runCatching { array.getJSONObject(i).let { MailMessage(it.getString("id"), it.getString("from"), it.getString("subject"), it.optString("intro", ""), it.optBoolean("seen")) } }.getOrNull() }
+        return (0 until array.length()).mapNotNull { i -> runCatching { array.getJSONObject(i).let { MailMessage(it.getString("id"), it.getString("from"), it.getString("subject"), it.optString("intro", ""), it.optBoolean("seen"), it.optString("body", "")) } }.getOrNull() }
     }
     fun saveMessages(context: Context, messages: List<MailMessage>) {
         val all = (cachedMessages(context).associateBy { it.id } + messages.associateBy { it.id }).values
-        val array = JSONArray(); all.forEach { array.put(JSONObject().put("id", it.id).put("from", it.from).put("subject", it.subject).put("intro", it.intro).put("seen", it.seen)) }
+        val array = JSONArray(); all.forEach { array.put(JSONObject().put("id", it.id).put("from", it.from).put("subject", it.subject).put("intro", it.intro).put("seen", it.seen).put("body", it.body)) }
         prefs(context).edit().putString("cached_messages", array.toString()).apply()
     }
 }
@@ -90,8 +90,16 @@ private suspend fun api(method: String, path: String, token: String? = null, bod
     }
     mailClient.newCall(builder.build()).execute().use { response ->
         val text = response.body?.string().orEmpty()
-        if (!response.isSuccessful) throw IllegalStateException(JSONObject(text.ifBlank { "{}" }).optString("detail", "Temp Mail API error (${response.code})"))
-        if (text.isBlank()) JSONObject() else if (text.trimStart().startsWith("[")) JSONObject().put("array_data", JSONArray(text)) else JSONObject(text)
+        if (!response.isSuccessful) {
+            val detail = runCatching {
+                val errorJson = JSONObject(text.ifBlank { "{}" })
+                errorJson.optString("detail").ifBlank { errorJson.optString("message") }
+            }.getOrNull().orEmpty()
+            throw IllegalStateException(detail.ifBlank { "Mail.tm request failed (${response.code}). Check the address and try Refresh." })
+        }
+        if (text.isBlank()) JSONObject()
+        else if (text.trimStart().startsWith("[")) JSONObject().put("array_data", JSONArray(text))
+        else JSONObject(text)
     }
 }
 
@@ -110,37 +118,48 @@ private suspend fun createMailAccount(): MailAccount {
 
 private suspend fun fetchMessages(account: MailAccount): List<MailMessage> {
     if (account.token.isBlank()) throw IllegalStateException("This saved address has no login session. Generate a new address.")
-    val msgsRes = api("GET", "/messages?page=1", account.token)
-    val rows = msgsRes.optJSONArray("hydra:member") ?: msgsRes.optJSONArray("array_data") ?: JSONArray()
+    val response = api("GET", "/messages?page=1", account.token)
+    val rows = response.optJSONArray("hydra:member") ?: response.optJSONArray("array_data") ?: JSONArray()
     return (0 until rows.length()).mapNotNull { i -> rows.optJSONObject(i)?.let { row ->
         MailMessage(row.optString("id"), row.optJSONObject("from")?.optString("address", "Unknown sender") ?: "Unknown sender", row.optString("subject", "(No subject)"), row.optString("intro", ""), row.optBoolean("seen"))
     } }.filter { it.id.isNotBlank() }
 }
 
+private suspend fun fetchMessageBody(account: MailAccount, messageId: String): String {
+    val detail = api("GET", "/messages/${java.net.URLEncoder.encode(messageId, "UTF-8")}", account.token)
+    val plain = detail.optJSONArray("text")?.let { array ->
+        (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }.joinToString("\n\n")
+    }.orEmpty()
+    if (plain.isNotBlank()) return plain
+    val html = detail.optJSONArray("html")?.let { array ->
+        (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }.joinToString("\n")
+    }.orEmpty()
+    if (html.isNotBlank()) return android.text.Html.fromHtml(html, android.text.Html.FROM_HTML_MODE_LEGACY).toString().trim()
+    return detail.optString("intro").ifBlank { "This message has no readable text body." }
+}
+
 /** Periodic background check. Android/WorkManager controls the exact run time (minimum 15 minutes). */
 class TempMailNotificationWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
-    override suspend fun doWork(): Result {
-        return try {
-            val prefs = applicationContext.getSharedPreferences("au_temp_mail_store", Context.MODE_PRIVATE)
-            val activeAddress = prefs.getString("active", null) ?: return Result.success()
-            val accounts = JSONArray(prefs.getString("accounts", "[]"))
-            var active: JSONObject? = null
-            for (i in 0 until accounts.length()) {
-                val row = accounts.optJSONObject(i) ?: continue
-                if (row.optString("address") == activeAddress && !row.optBoolean("deleted")) { active = row; break }
-            }
-            val account = active ?: return Result.success()
-            val token = account.optString("token", "")
-            if (token.isBlank()) return Result.success()
-            val messages = fetchMessages(MailAccount(activeAddress, account.optString("password", ""), token))
-            val ids = messages.map { it.id }.toSet()
-            val old = prefs.getStringSet("known_$activeAddress", emptySet())?.toSet() ?: emptySet()
-            val newMessages = messages.filter { it.id !in old }
-            if (old.isNotEmpty() && newMessages.isNotEmpty()) showTempMailNotification(applicationContext, newMessages.size, newMessages.first().subject, activeAddress)
-            prefs.edit().putStringSet("known_$activeAddress", old + ids).apply()
-            Result.success()
-        } catch (_: Exception) { Result.retry() }
-    }
+    override suspend fun doWork(): Result = try {
+        val prefs = applicationContext.getSharedPreferences("au_temp_mail_store", Context.MODE_PRIVATE)
+        val activeAddress = prefs.getString("active", null) ?: return Result.success()
+        val accounts = JSONArray(prefs.getString("accounts", "[]"))
+        var active: JSONObject? = null
+        for (i in 0 until accounts.length()) {
+            val row = accounts.optJSONObject(i) ?: continue
+            if (row.optString("address") == activeAddress && !row.optBoolean("deleted")) { active = row; break }
+        }
+        val account = active ?: return Result.success()
+        val token = account.optString("token", "")
+        if (token.isBlank()) return Result.success()
+        val messages = fetchMessages(MailAccount(activeAddress, account.optString("password", ""), token))
+        val ids = messages.map { it.id }.toSet()
+        val old = prefs.getStringSet("known_$activeAddress", emptySet())?.toSet() ?: emptySet()
+        val newMessages = messages.filter { it.id !in old }
+        if (old.isNotEmpty() && newMessages.isNotEmpty()) showTempMailNotification(applicationContext, newMessages.size, newMessages.first().subject, activeAddress)
+        prefs.edit().putStringSet("known_$activeAddress", old + ids).apply()
+        Result.success()
+    } catch (_: Exception) { Result.retry() }
 }
 
 private fun scheduleTempMailBackgroundChecks(context: Context) {
@@ -160,6 +179,8 @@ fun TempMailScreen(isDarkMode: Boolean, onBack: () -> Unit) {
     var cachedMessages by remember { mutableStateOf(TempMailStore.cachedMessages(context)) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var selectedMessage by remember { mutableStateOf<MailMessage?>(null) }
+    var selectedMessageBody by remember { mutableStateOf("") }
+    var messageBodyLoading by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var status by remember { mutableStateOf("Ready") }
@@ -167,6 +188,7 @@ fun TempMailScreen(isDarkMode: Boolean, onBack: () -> Unit) {
 
     fun refreshMessages(notify: Boolean = false) {
         val account = active ?: return
+        if (busy) return
         scope.launch {
             busy = true; error = null
             try {
@@ -181,8 +203,8 @@ fun TempMailScreen(isDarkMode: Boolean, onBack: () -> Unit) {
                 messages = fresh
                 TempMailStore.saveMessages(context, fresh)
                 cachedMessages = TempMailStore.cachedMessages(context)
-                status = "Last checked just now"
-            } catch (e: Exception) { error = e.message ?: "Unable to refresh inbox" }
+                status = if (fresh.isEmpty()) "Inbox checked — no messages received yet" else "Inbox checked — ${fresh.size} message(s) found"
+            } catch (e: Exception) { error = e.message ?: "Unable to refresh inbox"; status = "Inbox check failed" }
             finally { busy = false }
         }
     }
@@ -190,6 +212,21 @@ fun TempMailScreen(isDarkMode: Boolean, onBack: () -> Unit) {
     LaunchedEffect(active?.address) { if (active != null) refreshMessages() }
     LaunchedEffect(active?.address) {
         while (active != null) { delay(30_000); if (active != null) refreshMessages(notify = true) }
+    }
+    LaunchedEffect(selectedMessage?.id, active?.address) {
+        val message = selectedMessage
+        val account = active
+        selectedMessageBody = message?.body.orEmpty()
+        if (message != null && account != null && message.body.isBlank()) {
+            messageBodyLoading = true
+            try {
+                selectedMessageBody = fetchMessageBody(account, message.id)
+                TempMailStore.saveMessages(context, listOf(message.copy(body = selectedMessageBody)))
+                cachedMessages = TempMailStore.cachedMessages(context)
+            } catch (e: Exception) {
+                selectedMessageBody = message.intro.ifBlank { e.message ?: "Unable to load full email content. Check your connection and try again." }
+            } finally { messageBodyLoading = false }
+        }
     }
 
     val bg = if (isDarkMode) androidx.compose.ui.graphics.Color(0xFF10131A) else androidx.compose.ui.graphics.Color(0xFFF5F6FA)
@@ -230,7 +267,7 @@ fun TempMailScreen(isDarkMode: Boolean, onBack: () -> Unit) {
                     val visible = messages.filter { it.id !in deletedMessages.value }
                     if (visible.isEmpty() && !busy) EmptyTempMail("No messages yet", "Tap refresh to check this inbox.")
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) { items(visible, key = { it.id }) { message ->
-                        Card(colors = CardDefaults.cardColors(containerColor = card), modifier = Modifier.fillMaxWidth().clickable { selectedMessage = message }) { Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Email, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(10.dp)); Column(Modifier.weight(1f)) { Text(message.subject, color = fg, fontWeight = FontWeight.SemiBold); Text(message.from, color = fg.copy(alpha = .7f), fontSize = 12.sp); if (message.intro.isNotBlank()) Text(message.intro, color = fg.copy(alpha = .7f), fontSize = 12.sp, maxLines = 2) }; IconButton(onClick = { deletedMessages.value = (deletedMessages.value + message.id).toMutableSet(); TempMailStore.saveDeletedMessages(context, deletedMessages.value) }) { Icon(Icons.Default.Delete, "Move to deleted") } } }
+                        Card(colors = CardDefaults.cardColors(containerColor = card), modifier = Modifier.fillMaxWidth().clickable { selectedMessageBody = message.body; selectedMessage = message }) { Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Email, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(10.dp)); Column(Modifier.weight(1f)) { Text(message.subject, color = fg, fontWeight = FontWeight.SemiBold); Text(message.from, color = fg.copy(alpha = .7f), fontSize = 12.sp); if (message.intro.isNotBlank()) Text(message.intro, color = fg.copy(alpha = .7f), fontSize = 12.sp, maxLines = 2) }; IconButton(onClick = { deletedMessages.value = (deletedMessages.value + message.id).toMutableSet(); TempMailStore.saveDeletedMessages(context, deletedMessages.value) }) { Icon(Icons.Default.Delete, "Move to deleted") } } }
                     } }
                 }
                 1 -> AccountList(accounts.filter { !it.deleted }, active?.address, fg, card, onSelect = { account -> active = account; TempMailStore.save(context, accounts, account.address); selectedTab = 0 }, onDelete = { account -> accounts = accounts.map { if (it.address == account.address) it.copy(deleted = true) else it }.toMutableList(); TempMailStore.save(context, accounts); if (active?.address == account.address) { active = TempMailStore.active(context, accounts); active?.let { TempMailStore.save(context, accounts, it.address) } } })
@@ -243,7 +280,7 @@ fun TempMailScreen(isDarkMode: Boolean, onBack: () -> Unit) {
             }
         }
     }
-    selectedMessage?.let { message -> AlertDialog(onDismissRequest = { selectedMessage = null }, title = { Text(message.subject) }, text = { Column { Text("From: ${message.from}"); Spacer(Modifier.height(8.dp)); Text(message.intro.ifBlank { "No preview available. Open your provider inbox to view full content." }) } }, confirmButton = { TextButton(onClick = { selectedMessage = null }) { Text("Close") } }) }
+    selectedMessage?.let { message -> AlertDialog(onDismissRequest = { selectedMessage = null }, title = { Text(message.subject) }, text = { Column { Text("From: ${message.from}"); Spacer(Modifier.height(8.dp)); if (messageBodyLoading) LinearProgressIndicator(Modifier.fillMaxWidth()); Text(selectedMessageBody.ifBlank { message.intro.ifBlank { "Loading email content…" } }) } }, confirmButton = { TextButton(onClick = { selectedMessage = null }) { Text("Close") } }) }
 }
 
 @Composable private fun AccountList(accounts: List<MailAccount>, activeAddress: String?, fg: androidx.compose.ui.graphics.Color, card: androidx.compose.ui.graphics.Color, onSelect: (MailAccount) -> Unit, onDelete: (MailAccount) -> Unit) {
