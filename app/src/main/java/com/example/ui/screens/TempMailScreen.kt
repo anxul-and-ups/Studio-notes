@@ -87,11 +87,11 @@ private object TempMailStore {
     fun saveKnownIds(context: Context, address: String, ids: Set<String>) { prefs(context).edit().putStringSet("known_$address", ids).apply() }
     fun cachedMessages(context: Context): List<MailMessage> {
         val array = runCatching { JSONArray(prefs(context).getString("cached_messages", "[]")) }.getOrElse { JSONArray() }
-        return (0 until array.length()).mapNotNull { i -> runCatching { array.getJSONObject(i).let { MailMessage(it.getString("id"), it.getString("from"), it.getString("subject"), it.optString("intro", ""), it.optBoolean("seen"), it.optString("body", "")) } }.getOrNull() }
+        return (0 until array.length()).mapNotNull { i -> runCatching { array.getJSONObject(i).let { MailMessage(it.getString("id"), it.getString("from"), it.getString("subject"), it.optString("intro", ""), it.optBoolean("seen"), it.optString("htmlBody", ""), it.optString("textBody", "")) } }.getOrNull() }
     }
     fun saveMessages(context: Context, messages: List<MailMessage>) {
         val all = (cachedMessages(context).associateBy { it.id } + messages.associateBy { it.id }).values
-        val array = JSONArray(); all.forEach { array.put(JSONObject().put("id", it.id).put("from", it.from).put("subject", it.subject).put("intro", it.intro).put("seen", it.seen).put("body", it.body)) }
+        val array = JSONArray(); all.forEach { array.put(JSONObject().put("id", it.id).put("from", it.from).put("subject", it.subject).put("intro", it.intro).put("seen", it.seen).put("htmlBody", it.htmlBody).put("textBody", it.textBody)) }
         prefs(context).edit().putString("cached_messages", array.toString()).apply()
     }
 }
@@ -260,12 +260,12 @@ fun TempMailScreen(isDarkMode: Boolean, onBack: () -> Unit) {
     LaunchedEffect(selectedMessage?.id, active?.address) {
         val message = selectedMessage
         val account = active
-        selectedMessageBody = message?.body.orEmpty()
+        selectedMessageBody = message?.htmlBody.orEmpty().ifBlank { message?.textBody.orEmpty() }
         if (message != null && account != null && message.textBody.isBlank()) {
             messageBodyLoading = true
             try {
                 val fullMsg = fetchMessageBody(account, message.id); selectedMessageBody = fullMsg.htmlBody.ifBlank { fullMsg.textBody.ifBlank { fullMsg.intro } }
-                TempMailStore.saveMessages(context, listOf(message.copy(body = selectedMessageBody)))
+                TempMailStore.saveMessages(context, listOf(message.copy(htmlBody = selectedMessageBody)))
                 cachedMessages = TempMailStore.cachedMessages(context)
             } catch (e: Exception) {
                 selectedMessageBody = message.intro.ifBlank { e.message ?: "Unable to load full email content. Check your connection and try again." }
