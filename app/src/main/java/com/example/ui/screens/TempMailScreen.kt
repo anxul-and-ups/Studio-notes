@@ -91,12 +91,13 @@ private suspend fun api(method: String, path: String, token: String? = null, bod
     mailClient.newCall(builder.build()).execute().use { response ->
         val text = response.body?.string().orEmpty()
         if (!response.isSuccessful) throw IllegalStateException(JSONObject(text.ifBlank { "{}" }).optString("detail", "Temp Mail API error (${response.code})"))
-        if (text.isBlank()) JSONObject() else JSONObject(text)
+        if (text.isBlank()) JSONObject() else if (text.trimStart().startsWith("[")) JSONObject().put("array_data", JSONArray(text)) else JSONObject(text)
     }
 }
 
 private suspend fun createMailAccount(): MailAccount {
-    val domains = api("GET", "/domains").optJSONArray("hydra:member") ?: JSONArray()
+    val domainsRes = api("GET", "/domains")
+    val domains = domainsRes.optJSONArray("hydra:member") ?: domainsRes.optJSONArray("array_data") ?: JSONArray()
     val domain = (0 until domains.length()).mapNotNull { domains.optJSONObject(it) }.firstOrNull { it.optBoolean("isActive", true) && !it.optBoolean("isPrivate", false) }?.optString("domain")
         ?: throw IllegalStateException("No available email domain from provider")
     val local = "au${UUID.randomUUID().toString().replace("-", "").take(12)}"
@@ -109,7 +110,8 @@ private suspend fun createMailAccount(): MailAccount {
 
 private suspend fun fetchMessages(account: MailAccount): List<MailMessage> {
     if (account.token.isBlank()) throw IllegalStateException("This saved address has no login session. Generate a new address.")
-    val rows = api("GET", "/messages?page=1", account.token).optJSONArray("hydra:member") ?: JSONArray()
+    val msgsRes = api("GET", "/messages?page=1", account.token)
+    val rows = msgsRes.optJSONArray("hydra:member") ?: msgsRes.optJSONArray("array_data") ?: JSONArray()
     return (0 until rows.length()).mapNotNull { i -> rows.optJSONObject(i)?.let { row ->
         MailMessage(row.optString("id"), row.optJSONObject("from")?.optString("address", "Unknown sender") ?: "Unknown sender", row.optString("subject", "(No subject)"), row.optString("intro", ""), row.optBoolean("seen"))
     } }.filter { it.id.isNotBlank() }
