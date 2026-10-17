@@ -1,0 +1,6 @@
+{
+  "name": "AU Notes",
+  "description": "macOS-inspired Glassmorphic and Neumorphic notes workstation with AI chat, rich text editing, attachments, and PDF preview.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
