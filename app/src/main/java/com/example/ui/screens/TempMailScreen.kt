@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.*
@@ -55,7 +56,7 @@ private val mailClient = OkHttpClient.Builder().callTimeout(25, TimeUnit.SECONDS
 private val jsonType = "application/json".toMediaType()
 
 private data class MailAccount(val address: String, val password: String, val token: String, val deleted: Boolean = false)
-private data class MailAttachment(val id: String, val filename: String, val contentType: String, val size: Int, val downloadUrl: String)
+data class MailAttachment(val id: String, val filename: String, val contentType: String, val size: Int, val downloadUrl: String)
 data class MailMessage(
     val id: String,
     val from: String,
@@ -260,10 +261,10 @@ fun TempMailScreen(isDarkMode: Boolean, onBack: () -> Unit) {
         val message = selectedMessage
         val account = active
         selectedMessageBody = message?.body.orEmpty()
-        if (message != null && account != null && message.body.isBlank()) {
+        if (message != null && account != null && message.textBody.isBlank()) {
             messageBodyLoading = true
             try {
-                selectedMessageBody = fetchMessageBody(account, message.id)
+                val fullMsg = fetchMessageBody(account, message.id); selectedMessageBody = fullMsg.htmlBody.ifBlank { fullMsg.textBody.ifBlank { fullMsg.intro } }
                 TempMailStore.saveMessages(context, listOf(message.copy(body = selectedMessageBody)))
                 cachedMessages = TempMailStore.cachedMessages(context)
             } catch (e: Exception) {
@@ -310,7 +311,7 @@ fun TempMailScreen(isDarkMode: Boolean, onBack: () -> Unit) {
                     val visible = messages.filter { it.id !in deletedMessages.value }
                     if (visible.isEmpty() && !busy) EmptyTempMail("No messages yet", "Tap refresh to check this inbox.")
                     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) { items(visible, key = { it.id }) { message ->
-                        Card(colors = CardDefaults.cardColors(containerColor = card), modifier = Modifier.fillMaxWidth().clickable { selectedMessageBody = message.body; selectedMessage = message }) { Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Email, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(10.dp)); Column(Modifier.weight(1f)) { Text(message.subject, color = fg, fontWeight = FontWeight.SemiBold); Text(message.from, color = fg.copy(alpha = .7f), fontSize = 12.sp); if (message.intro.isNotBlank()) Text(message.intro, color = fg.copy(alpha = .7f), fontSize = 12.sp, maxLines = 2) }; IconButton(onClick = { deletedMessages.value = (deletedMessages.value + message.id).toMutableSet(); TempMailStore.saveDeletedMessages(context, deletedMessages.value) }) { Icon(Icons.Default.Delete, "Move to deleted") } } }
+                        Card(colors = CardDefaults.cardColors(containerColor = card), modifier = Modifier.fillMaxWidth().clickable { selectedMessageBody = message.textBody; selectedMessage = message }) { Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Email, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(10.dp)); Column(Modifier.weight(1f)) { Text(message.subject, color = fg, fontWeight = FontWeight.SemiBold); Text(message.from, color = fg.copy(alpha = .7f), fontSize = 12.sp); if (message.intro.isNotBlank()) Text(message.intro, color = fg.copy(alpha = .7f), fontSize = 12.sp, maxLines = 2) }; IconButton(onClick = { deletedMessages.value = (deletedMessages.value + message.id).toMutableSet(); TempMailStore.saveDeletedMessages(context, deletedMessages.value) }) { Icon(Icons.Default.Delete, "Move to deleted") } } }
                     } }
                 }
                 1 -> AccountList(accounts.filter { !it.deleted }, active?.address, fg, card, onSelect = { account -> active = account; TempMailStore.save(context, accounts, account.address); selectedTab = 0 }, onDelete = { account -> accounts = accounts.map { if (it.address == account.address) it.copy(deleted = true) else it }.toMutableList(); TempMailStore.save(context, accounts); if (active?.address == account.address) { active = TempMailStore.active(context, accounts); active?.let { TempMailStore.save(context, accounts, it.address) } } })
