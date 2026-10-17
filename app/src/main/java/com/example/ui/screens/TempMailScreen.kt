@@ -142,26 +142,27 @@ private suspend fun fetchMessageBody(account: MailAccount, messageId: String): S
 class TempMailNotificationWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         return try {
-        val prefs = applicationContext.getSharedPreferences("au_temp_mail_store", Context.MODE_PRIVATE)
-        val activeAddress = prefs.getString("active", null) ?: return Result.success()
-        val accounts = JSONArray(prefs.getString("accounts", "[]"))
-        var active: JSONObject? = null
-        for (i in 0 until accounts.length()) {
-            val row = accounts.optJSONObject(i) ?: continue
-            if (row.optString("address") == activeAddress && !row.optBoolean("deleted")) { active = row; break }
-        }
-        val account = active ?: return Result.success()
-        val token = account.optString("token", "")
-        if (token.isBlank()) return Result.success()
-        val messages = fetchMessages(MailAccount(activeAddress, account.optString("password", ""), token))
-        val ids = messages.map { it.id }.toSet()
-        val old = prefs.getStringSet("known_$activeAddress", emptySet())?.toSet() ?: emptySet()
-        val newMessages = messages.filter { it.id !in old }
-        if (old.isNotEmpty() && newMessages.isNotEmpty()) showTempMailNotification(applicationContext, newMessages.size, newMessages.first().subject, activeAddress)
-        prefs.edit().putStringSet("known_$activeAddress", old + ids).apply()
-        Result.success()
+            val prefs = applicationContext.getSharedPreferences("au_temp_mail_store", Context.MODE_PRIVATE)
+            val activeAddress = prefs.getString("active", null) ?: return Result.success()
+            val accounts = JSONArray(prefs.getString("accounts", "[]"))
+            var active: JSONObject? = null
+            for (i in 0 until accounts.length()) {
+                val row = accounts.optJSONObject(i) ?: continue
+                if (row.optString("address") == activeAddress && !row.optBoolean("deleted")) { active = row; break }
+            }
+            val account = active ?: return Result.success()
+            val token = account.optString("token", "")
+            if (token.isBlank()) return Result.success()
+            val messages = fetchMessages(MailAccount(activeAddress, account.optString("password", ""), token))
+            val ids = messages.map { it.id }.toSet()
+            val old = prefs.getStringSet("known_$activeAddress", emptySet())?.toSet() ?: emptySet()
+            val newMessages = messages.filter { it.id !in old }
+            if (old.isNotEmpty() && newMessages.isNotEmpty()) showTempMailNotification(applicationContext, newMessages.size, newMessages.first().subject, activeAddress)
+            prefs.edit().putStringSet("known_$activeAddress", old + ids).apply()
+            Result.success()
         } catch (_: Exception) { Result.retry() }
     }
+}
 
 private fun scheduleTempMailBackgroundChecks(context: Context) {
     val request = PeriodicWorkRequestBuilder<TempMailNotificationWorker>(15, TimeUnit.MINUTES).build()
